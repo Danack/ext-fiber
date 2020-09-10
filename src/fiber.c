@@ -20,6 +20,7 @@
 #include "zend_closures.h"
 
 #include "php_fiber.h"
+#include "awaitable.h"
 #include "fiber.h"
 
 #ifndef ZEND_PARSE_PARAMETERS_NONE
@@ -36,6 +37,8 @@ static void zend_fiber_object_destroy(zend_object *object);
 static zend_op_array fiber_run_func;
 static zend_try_catch_element fiber_terminate_try_catch_array = { 0, 1, 0, 0 };
 static zend_op fiber_run_op[2];
+
+static zend_string *fiber_continuation_name;
 
 #define ZEND_FIBER_BACKUP_EG(stack, stack_page_size, exec) do { \
 	stack = EG(vm_stack); \
@@ -248,75 +251,30 @@ ZEND_METHOD(Fiber, run)
 /* }}} */
 
 
-/* {{{ proto int Fiber::getStatus() */
-ZEND_METHOD(Fiber, getStatus)
-{
-	ZEND_PARSE_PARAMETERS_NONE();
-
-	zend_fiber *fiber = (zend_fiber *) Z_OBJ_P(getThis());
-
-	RETURN_LONG(fiber->status);
-}
-/* }}} */
-
-
-/* {{{ proto bool Fiber::isSuspended() */
-ZEND_METHOD(Fiber, isSuspended)
-{
-	ZEND_PARSE_PARAMETERS_NONE();
-
-	zend_fiber *fiber = (zend_fiber *) Z_OBJ_P(getThis());
-	
-	RETURN_BOOL(fiber->status == ZEND_FIBER_STATUS_SUSPENDED);
-}
-/* }}} */
-
-
-/* {{{ proto bool Fiber::isRunning() */
-ZEND_METHOD(Fiber, isRunning)
-{
-	ZEND_PARSE_PARAMETERS_NONE();
-
-	zend_fiber *fiber = (zend_fiber *) Z_OBJ_P(getThis());
-	
-	RETURN_BOOL(fiber->status == ZEND_FIBER_STATUS_RUNNING);
-}
-/* }}} */
-
-
-/* {{{ proto bool Fiber::isTerminated() */
-ZEND_METHOD(Fiber, isTerminated)
-{
-	ZEND_PARSE_PARAMETERS_NONE();
-
-	zend_fiber *fiber = (zend_fiber *) Z_OBJ_P(getThis());
-	
-	RETURN_BOOL(fiber->status == ZEND_FIBER_STATUS_FINISHED || fiber->status == ZEND_FIBER_STATUS_DEAD);
-}
-/* }}} */
-
-
-/* {{{ proto void Fiber::resume() */
-ZEND_METHOD(Fiber, resume)
+/* {{{ proto void Fiber::continue() */
+ZEND_METHOD(Fiber, continue)
 {
 	zend_fiber *fiber;
-	zval *value;
+	zval *value = NULL;
+	zval *exception = NULL;
 
-	value = NULL;
-
-	ZEND_PARSE_PARAMETERS_START_EX(ZEND_PARSE_PARAMS_THROW, 0, 1)
+	ZEND_PARSE_PARAMETERS_START_EX(ZEND_PARSE_PARAMS_THROW, 1, 2)
+		Z_PARAM_OBJECT_OF_CLASS_EX(exception, zend_ce_throwable, 1, 0)
 		Z_PARAM_OPTIONAL
 		Z_PARAM_ZVAL(value);
 	ZEND_PARSE_PARAMETERS_END();
 
 	fiber = (zend_fiber *) Z_OBJ_P(getThis());
-
+	
 	if (fiber->status != ZEND_FIBER_STATUS_SUSPENDED) {
 		zend_throw_error(zend_ce_fiber_error, "Cannot resume running fiber");
 		return;
 	}
 	
-	if (value != NULL) {
+	if (exception != NULL) {
+		Z_ADDREF_P(exception);
+		fiber->error = exception;
+	} else if (value != NULL) {
 		Z_TRY_ADDREF_P(value);
 		fiber->value = value;
 	}
@@ -328,42 +286,6 @@ ZEND_METHOD(Fiber, resume)
 	
 	fiber->status = ZEND_FIBER_STATUS_RUNNING;
 	
-	if (!zend_fiber_switch_to(fiber)) {
-		zend_throw_error(NULL, "Failed switching to fiber");
-		return;
-	}
-}
-/* }}} */
-
-
-/* {{{ proto mixed Fiber::throw(Throwable $exception) */
-ZEND_METHOD(Fiber, throw)
-{
-	zend_fiber *fiber;
-	zval *exception;
-
-	ZEND_PARSE_PARAMETERS_START_EX(ZEND_PARSE_PARAMS_THROW, 1, 1)
-		Z_PARAM_OBJECT_OF_CLASS(exception, zend_ce_throwable)
-	ZEND_PARSE_PARAMETERS_END();
-
-	fiber = (zend_fiber *) Z_OBJ_P(getThis());
-
-	if (fiber->status != ZEND_FIBER_STATUS_SUSPENDED) {
-		zend_throw_error(zend_ce_fiber_error, "Cannot throw exception into running fiber");
-		return;
-	}
-
-	Z_ADDREF_P(exception);
-
-	fiber->error = exception;
-	
-	if (fiber->suspending) {
-		fiber->suspending = 0;
-		return;
-	}
-
-	fiber->status = ZEND_FIBER_STATUS_RUNNING;
-
 	if (!zend_fiber_switch_to(fiber)) {
 		zend_throw_error(NULL, "Failed switching to fiber");
 		return;
@@ -386,48 +308,59 @@ ZEND_METHOD(Fiber, inFiber)
 /* }}} */
 
 
-/* {{{ proto void Fiber::suspend() */
-ZEND_METHOD(Fiber, suspend)
+/* {{{ proto void Fiber::await() */
+ZEND_METHOD(Fiber, await)
 {
 	zend_fiber *fiber;
 	zend_execute_data *exec;
 	size_t stack_page_size;
-	zend_fcall_info fci;
-	zend_fcall_info_cache fci_cache;
-	zval param;
+	
+	zval *awaitable;
+	zval method_name;
 	zval retval;
+	
+	zend_function *func;
+	zval callback;
+	zval context;
+
 	zval *error;
 	
 	fiber = FIBER_G(current_fiber);
 
 	if (UNEXPECTED(fiber == NULL)) {
-		zend_throw_error(zend_ce_fiber_error, "Cannot suspend from outside a fiber");
+		zend_throw_error(zend_ce_fiber_error, "Cannot await from outside a fiber");
 		return;
 	}
 
 	if (fiber->status != ZEND_FIBER_STATUS_RUNNING) {
-		zend_throw_error(zend_ce_fiber_error, "Cannot suspend from a fiber that is not running");
+		zend_throw_error(zend_ce_fiber_error, "Cannot await from a fiber that is not running");
 		return;
 	}
 
 	ZEND_PARSE_PARAMETERS_START_EX(ZEND_PARSE_PARAMS_THROW, 1, 1)
-		Z_PARAM_FUNC_EX(fci, fci_cache, 1, 0)
+		Z_PARAM_OBJECT_OF_CLASS_EX(awaitable, zend_ce_awaitable, 0, 0)
 	ZEND_PARSE_PARAMETERS_END();
-
+	
 	fiber->status = ZEND_FIBER_STATUS_SUSPENDED;
 	
-	ZVAL_OBJ(&param, &fiber->std);
+	ZVAL_OBJ(&context, &fiber->std);
 	
-	fci.params = &param;
-	fci.param_count = 1;
-	fci.retval = &retval;
+	func = zend_hash_find_ptr(&zend_ce_fiber->function_table, fiber_continuation_name);
+	zend_create_closure(&callback, func, zend_ce_fiber, zend_ce_fiber, &context);
+	
+	Z_DELREF(callback);
 	
 	fiber->suspending = 1;
 	
-	if (zend_call_function(&fci, &fci_cache) == FAILURE) {
+	ZVAL_STRING(&method_name, "when");
+	
+	if (call_user_function(NULL, awaitable, &method_name, &retval, 1, &callback) == FAILURE) {
 		fiber->suspending = 0;
+		zval_ptr_dtor(&method_name);
 		return;
 	}
+	
+	zval_ptr_dtor(&method_name);
 
 	if (fiber->suspending) {
 		fiber->suspending = 0;
@@ -463,20 +396,6 @@ ZEND_METHOD(Fiber, suspend)
 /* }}} */
 
 
-/* {{{ proto Fiber::__wakeup() */
-ZEND_METHOD(Fiber, __wakeup)
-{
-	/* Just specifying the zend_class_unserialize_deny handler is not enough,
-	 * because it is only invoked for C unserialization. For O the error has
-	 * to be thrown in __wakeup. */
-
-	ZEND_PARSE_PARAMETERS_NONE();
-
-	zend_throw_error(zend_ce_fiber_error, "Unserialization of 'Fiber' is not allowed");
-}
-/* }}} */
-
-
 /* {{{ proto FiberError::__construct(string $message) */
 ZEND_METHOD(FiberError, __construct)
 {
@@ -490,34 +409,23 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_run, 0, 0, IS_VOID, 1)
 	ZEND_ARG_VARIADIC_INFO(0, arguments)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_status, 0, 0, _IS_BOOL, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_inFiber, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_fiber_resume, 0, 0, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_continue, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, exception, Throwable, 1)
 	ZEND_ARG_INFO(0, value)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO(arginfo_fiber_throw, 0)
-	 ZEND_ARG_OBJ_INFO(0, exception, Throwable, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_fiber_suspend, 0, 0, 0)
-	ZEND_ARG_CALLABLE_INFO(0, callable, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_void, 0, 0, IS_VOID, 0)
+ZEND_BEGIN_ARG_INFO_EX(arginfo_fiber_await, 0, 0, 0)
+	ZEND_ARG_OBJ_INFO(0, awaitable, Awaitable, 0)
 ZEND_END_ARG_INFO()
 
 static const zend_function_entry fiber_methods[] = {
 	ZEND_ME(Fiber, run, arginfo_fiber_run, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-	ZEND_ME(Fiber, isSuspended, arginfo_fiber_status, ZEND_ACC_PUBLIC)
-	ZEND_ME(Fiber, isRunning, arginfo_fiber_status, ZEND_ACC_PUBLIC)
-	ZEND_ME(Fiber, isTerminated, arginfo_fiber_status, ZEND_ACC_PUBLIC)
-	ZEND_ME(Fiber, resume, arginfo_fiber_resume, ZEND_ACC_PUBLIC)
-	ZEND_ME(Fiber, throw, arginfo_fiber_throw, ZEND_ACC_PUBLIC)
-	ZEND_ME(Fiber, inFiber, arginfo_fiber_status, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-	ZEND_ME(Fiber, suspend, arginfo_fiber_suspend, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-	ZEND_ME(Fiber, __wakeup, arginfo_fiber_void, ZEND_ACC_PUBLIC)
+	ZEND_ME(Fiber, continue, arginfo_fiber_continue, ZEND_ACC_PRIVATE)
+	ZEND_ME(Fiber, inFiber, arginfo_fiber_inFiber, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+	ZEND_ME(Fiber, await, arginfo_fiber_await, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_FE_END
 };
 
@@ -577,12 +485,15 @@ void zend_fiber_ce_register()
 	zend_ce_fiber_error = zend_register_internal_class_ex(&ce, zend_ce_error);
 	zend_ce_fiber_error->ce_flags |= ZEND_ACC_FINAL;
 	zend_ce_fiber_error->create_object = zend_ce_error->create_object;
+	
+	fiber_continuation_name = zend_string_init("continue", sizeof("continue") - 1, 1);
 }
 
 void zend_fiber_ce_unregister()
 {
 	zend_string_free(fiber_run_func.function_name);
 	fiber_run_func.function_name = NULL;
+	zend_string_free(fiber_continuation_name);
 }
 
 void zend_fiber_shutdown()

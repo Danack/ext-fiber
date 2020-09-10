@@ -14,48 +14,15 @@ final class Fiber
     private function __construct() { }
 
     /**
-     * @return bool True if the fiber is suspended.
-     */
-    public function isSuspended(): bool { }
-
-    /**
-     * @return bool True if the fiber is currently running.
-     */
-    public function isRunning(): bool { }
-
-    /**
-     * @return bool True if the fiber has completed execution.
-     */
-    public function isTerminated(): bool { }
-
-    /**
-     * Resume execution of the fiber, returning the given value from {@see Fiber::suspend()}.
+     * Suspend execution of the fiber until the given awaitable resolves.
      *
-     * @param mixed $value
-     *
-     * @throws FiberError Thrown if the fiber has finished or is currently running.
-     */
-    public function resume(mixed $value): void { }
-
-    /**
-     * Throw an exception from {@see Fiber::suspend()}.
-     *
-     * @param Throwable $exception
-     *
-     * @throws FiberError Thrown if the fiber has finished or is currently running.
-     */
-    public function throw(\Throwable $exception): void { }
-
-    /**
-     * Suspend execution of the fiber.
-     *
-     * @param callable(Fiber $fiber):void $scheduler
+     * @param Awaitable $awaitable
      *
      * @return mixed Value given to {@see Fiber::resume()}.
      *
      * @throws FiberError Thrown if not within a fiber context.
      */
-    public static function suspend(callable $scheduler): mixed { }
+    public static function await(Awaitable $awaitable): mixed { }
 
     /**
      * Returns the current Fiber context or null if not within a fiber.

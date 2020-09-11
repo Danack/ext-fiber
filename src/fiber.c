@@ -176,7 +176,7 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 }
 
 
-static void delete_awaitable_callback(zval *ptr)
+static void fiber_callback_destroy(zval *ptr)
 {
 	zend_awaitable_callback *callback = Z_PTR_P(ptr);
 	zval_ptr_dtor(&callback->fci.function_name);
@@ -196,9 +196,6 @@ static int fiber_run_opcode_handler(zend_execute_data *exec)
 	fiber->fci.retval = &retval;
 
 	zend_call_function(&fiber->fci, &fiber->fci_cache);
-	
-	zval_ptr_dtor(&fiber->fci.function_name);
-	GC_DELREF(&fiber->std);
 
 	if (EG(exception)) {
 		fiber->status = ZEND_FIBER_STATUS_DEAD;
@@ -233,7 +230,7 @@ static zend_object *zend_fiber_object_create(zend_class_entry *ce)
 	ZVAL_NULL(&fiber->result[0]);
 	ZVAL_NULL(&fiber->result[1]);
 	fiber->callbacks = zend_new_array(0);
-	zend_hash_init(fiber->callbacks, 0, NULL, delete_awaitable_callback, 0);
+	zend_hash_init(fiber->callbacks, 0, NULL, fiber_callback_destroy, 0);
 
 	return &fiber->std;
 }
@@ -257,12 +254,16 @@ static void zend_fiber_object_destroy(zend_object *object)
 		fiber->callbacks = NULL;
 	}
 	
+	zval_ptr_dtor(&fiber->fci.function_name);
+	
 	zval_ptr_dtor(&fiber->result[0]);
 	zval_ptr_dtor(&fiber->result[1]);
 
 	zend_fiber_destroy(fiber->context);
 
 	zend_object_std_dtor(&fiber->std);
+	
+	efree(fiber);
 }
 
 
@@ -371,7 +372,7 @@ ZEND_METHOD(Fiber, continue)
 /* }}} */
 
 
-/* {{{ proto Fiber::inFiber() */
+/* {{{ proto bool Fiber::inFiber() */
 ZEND_METHOD(Fiber, inFiber)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
@@ -399,7 +400,6 @@ ZEND_METHOD(Fiber, await)
 	zend_function *func;
 	zval callback;
 	zval context;
-	int result;
 
 	zval *error;
 	
@@ -420,6 +420,7 @@ ZEND_METHOD(Fiber, await)
 	ZEND_PARSE_PARAMETERS_END();
 	
 	fiber->status = ZEND_FIBER_STATUS_SUSPENDED;
+	fiber->state = ZEND_FIBER_STATE_SUSPENDING;
 	
 	ZVAL_OBJ(&context, &fiber->std);
 	
@@ -428,13 +429,11 @@ ZEND_METHOD(Fiber, await)
 	
 	Z_DELREF(callback);
 	
-	fiber->state = ZEND_FIBER_STATE_SUSPENDING;
-	
 	ZVAL_STRING(&method_name, "onResolve");
-	result = call_user_function(NULL, awaitable, &method_name, &retval, 1, &callback);
+	call_user_function(NULL, awaitable, &method_name, &retval, 1, &callback);
 	zval_ptr_dtor(&method_name);
 	
-	if (result == FAILURE) {
+	if (EG(exception)) {
 		fiber->state = ZEND_FIBER_STATE_READY;
 		return;
 	}
@@ -496,9 +495,9 @@ ZEND_METHOD(Fiber, onResolve)
 	}
 	
 	callback = emalloc(sizeof(zend_awaitable_callback));
-	
-	memcpy(&callback->fci, &fci, sizeof(zend_fcall_info));
-	memcpy(&callback->fci_cache, &fci_cache, sizeof(zend_fcall_info_cache));
+
+	callback->fci = fci;
+	callback->fci_cache = fci_cache;
 	
 	Z_TRY_ADDREF(callback->fci.function_name);
 	
@@ -594,7 +593,7 @@ void zend_fiber_ce_register()
 	
 	zend_class_implements(zend_ce_fiber, 1, zend_ce_awaitable);
 
-	memcpy(&zend_fiber_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+	zend_fiber_handlers = std_object_handlers;
 	zend_fiber_handlers.free_obj = zend_fiber_object_destroy;
 	zend_fiber_handlers.clone_obj = NULL;
 	zend_fiber_handlers.get_constructor = zend_fiber_get_constructor;
@@ -612,6 +611,7 @@ void zend_fiber_ce_unregister()
 	zend_string_free(fiber_run_func.function_name);
 	fiber_run_func.function_name = NULL;
 	zend_string_free(fiber_continuation_name);
+	fiber_continuation_name = NULL;
 }
 
 void zend_fiber_shutdown()

@@ -146,33 +146,15 @@ static int fiber_invoke_callback(zend_fiber *fiber, zend_fcall_info *fci, zend_f
 static void fiber_invoke_callbacks(zend_fiber *fiber)
 {
 	zend_awaitable_callback *callback;
-	zend_object *error = NULL;
-	zval exception;
 	
 	ZEND_HASH_FOREACH_PTR(fiber->callbacks, callback) {
 		fiber_invoke_callback(fiber, &callback->fci, &callback->fci_cache);
 		
 		if (EG(exception)) {
-			if (error != NULL) {
-				zend_exception_set_previous(EG(exception), error);
-				GC_DELREF(error);
-			}
-			
-			error = EG(exception);
-			GC_ADDREF(error);
-			
-			zend_clear_exception();
+			zend_throw_exception(zend_ce_fiber_error, "Exception thrown in onResolve() callback", 0);
+			return;
 		}
 	} ZEND_HASH_FOREACH_END();
-	
-	if (error != NULL) {
-		ZVAL_OBJ(&exception, error);
-		Z_ADDREF(exception);
-		zend_throw_exception_object(&exception);
-		zval_ptr_dtor(&exception);
-
-		zend_throw_error(NULL, "Exception thrown in onResolve() callback");
-	}
 }
 
 
@@ -489,7 +471,7 @@ ZEND_METHOD(Fiber, onResolve)
 	if (fiber->status == ZEND_FIBER_STATUS_FINISHED || fiber->status == ZEND_FIBER_STATUS_DEAD) {
 		fiber_invoke_callback(fiber, &fci, &fci_cache);
 		if (EG(exception)) {
-			zend_throw_error(NULL, "Exception thrown in onResolve callback");
+			zend_throw_exception(zend_ce_fiber_error, "Exception thrown in onResolve() callback", 0);
 		}
 		return;
 	}

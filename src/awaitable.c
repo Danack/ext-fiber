@@ -22,7 +22,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_awaitable_when, 0, 1, IS_VOID, 0
 ZEND_END_ARG_INFO()
 
 static const zend_function_entry awaitable_methods[] = {
-	ZEND_ABSTRACT_ME_WITH_FLAGS(Awaitable, when, arginfo_awaitable_when, ZEND_ACC_PUBLIC | ZEND_ACC_ABSTRACT)
+	ZEND_ABSTRACT_ME(Awaitable, when, arginfo_awaitable_when)
 	ZEND_FE_END
 };
 

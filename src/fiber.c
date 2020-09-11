@@ -128,7 +128,7 @@ static void zend_fiber_run()
 }
 
 
-static zend_result fiber_invoke_callback(zend_fiber *fiber, zend_fcall_info *fci, zend_fcall_info_cache *fci_cache)
+static int fiber_invoke_callback(zend_fiber *fiber, zend_fcall_info *fci, zend_fcall_info_cache *fci_cache)
 {
 	zval retval;
 	
@@ -147,6 +147,7 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 {
 	zend_awaitable_callback *callback;
 	zend_object *error = NULL;
+	zval exception;
 	
 	ZEND_HASH_FOREACH_PTR(fiber->callbacks, callback) {
 		fiber_invoke_callback(fiber, &callback->fci, &callback->fci_cache);
@@ -168,7 +169,9 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 	} ZEND_HASH_FOREACH_END();
 	
 	if (error != NULL) {
-		zend_throw_exception_internal(error);
+		ZVAL_OBJ(&exception, error);
+		zend_throw_exception_object(&exception);
+		zval_ptr_dtor(&exception);
 	}
 }
 
@@ -391,7 +394,7 @@ ZEND_METHOD(Fiber, await)
 	zend_function *func;
 	zval callback;
 	zval context;
-	zend_result result;
+	int result;
 
 	zval *error;
 	

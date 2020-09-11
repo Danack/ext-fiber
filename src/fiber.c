@@ -167,8 +167,11 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 	
 	if (error != NULL) {
 		ZVAL_OBJ(&exception, error);
+		Z_ADDREF(exception);
 		zend_throw_exception_object(&exception);
 		zval_ptr_dtor(&exception);
+
+		zend_throw_error(NULL, "Exception thrown in when() callback");
 	}
 }
 
@@ -265,7 +268,7 @@ static void zend_fiber_object_destroy(zend_object *object)
 
 static ZEND_COLD zend_function *zend_fiber_get_constructor(zend_object *object)
 {
-	zend_throw_error(NULL, "Use Fiber::create() to create a new fiber");
+	zend_throw_error(NULL, "Use Fiber::run() to create a new fiber");
 	
 	return NULL;
 }
@@ -486,6 +489,9 @@ ZEND_METHOD(Fiber, when)
 	
 	if (fiber->status == ZEND_FIBER_STATUS_FINISHED || fiber->status == ZEND_FIBER_STATUS_DEAD) {
 		fiber_invoke_callback(fiber, &fci, &fci_cache);
+		if (EG(exception)) {
+			zend_throw_error(NULL, "Exception thrown in when callback");
+		}
 		return;
 	}
 	

@@ -163,9 +163,6 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 			
 			zend_clear_exception();
 		}
-		
-		zval_ptr_dtor(&callback->fci.function_name);
-		efree(callback);
 	} ZEND_HASH_FOREACH_END();
 	
 	if (error != NULL) {
@@ -173,6 +170,14 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 		zend_throw_exception_object(&exception);
 		zval_ptr_dtor(&exception);
 	}
+}
+
+
+static void delete_awaitable_callback(zval *ptr)
+{
+	zend_awaitable_callback *callback = Z_PTR_P(ptr);
+	zval_ptr_dtor(&callback->fci.function_name);
+	efree(callback);
 }
 
 
@@ -199,12 +204,13 @@ static int fiber_run_opcode_handler(zend_execute_data *exec)
 		zend_clear_exception();
 	} else {
 		fiber->status = ZEND_FIBER_STATUS_FINISHED;
-		ZVAL_COPY(&fiber->result[1], &retval);
+		ZVAL_COPY_VALUE(&fiber->result[1], &retval);
 	}
 	
 	fiber_invoke_callbacks(fiber);
 	
-	zend_array_destroy(fiber->callbacks);
+	zend_hash_destroy(fiber->callbacks);
+	FREE_HASHTABLE(fiber->callbacks);
 	fiber->callbacks = NULL;
 
 	return ZEND_USER_OPCODE_RETURN;
@@ -224,6 +230,7 @@ static zend_object *zend_fiber_object_create(zend_class_entry *ce)
 	ZVAL_NULL(&fiber->result[0]);
 	ZVAL_NULL(&fiber->result[1]);
 	fiber->callbacks = zend_new_array(0);
+	zend_hash_init(fiber->callbacks, 0, NULL, delete_awaitable_callback, 0);
 
 	return &fiber->std;
 }
@@ -232,7 +239,6 @@ static zend_object *zend_fiber_object_create(zend_class_entry *ce)
 static void zend_fiber_object_destroy(zend_object *object)
 {
 	zend_fiber *fiber;
-	zend_awaitable_callback *callback;
 
 	fiber = (zend_fiber *) object;
 
@@ -243,17 +249,13 @@ static void zend_fiber_object_destroy(zend_object *object)
 	}
 	
 	if (fiber->callbacks != NULL) {
-		ZEND_HASH_FOREACH_PTR(fiber->callbacks, callback) {
-			zval_ptr_dtor(&callback->fci.function_name);
-			efree(callback);
-		} ZEND_HASH_FOREACH_END();
-		
-		zend_array_destroy(fiber->callbacks);
+		zend_hash_destroy(fiber->callbacks);
+		FREE_HASHTABLE(fiber->callbacks);
 		fiber->callbacks = NULL;
 	}
 	
-	Z_TRY_DELREF(fiber->result[0]);
-	Z_TRY_DELREF(fiber->result[1]);
+	zval_ptr_dtor(&fiber->result[0]);
+	zval_ptr_dtor(&fiber->result[1]);
 
 	zend_fiber_destroy(fiber->context);
 

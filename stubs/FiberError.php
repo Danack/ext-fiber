@@ -6,7 +6,7 @@
 final class FiberError extends Error
 {
     /**
-     * Private constructor to prevent user code from throwing FiberError.
+     * Throwing constructor to prevent user code from throwing FiberError.
      */
     public function __construct(string $message)
     {

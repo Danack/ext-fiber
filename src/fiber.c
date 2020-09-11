@@ -128,6 +128,51 @@ static void zend_fiber_run()
 }
 
 
+static zend_result fiber_invoke_callback(zend_fiber *fiber, zend_fcall_info *fci, zend_fcall_info_cache *fci_cache)
+{
+	zval retval;
+	
+	fci->params = fiber->result;
+	fci->param_count = 2;
+#if PHP_VERSION_ID < 80000
+	fci->no_separation = 1;
+#endif
+	fci->retval = &retval;
+	
+	return zend_call_function(fci, fci_cache);
+}
+
+
+static void fiber_invoke_callbacks(zend_fiber *fiber)
+{
+	zend_awaitable_callback *callback;
+	zend_object *error = NULL;
+	
+	ZEND_HASH_FOREACH_PTR(fiber->callbacks, callback) {
+		fiber_invoke_callback(fiber, &callback->fci, &callback->fci_cache);
+		
+		if (EG(exception)) {
+			if (error != NULL) {
+				zend_exception_set_previous(EG(exception), error);
+				GC_DELREF(error);
+			}
+			
+			error = EG(exception);
+			GC_ADDREF(error);
+			
+			zend_clear_exception();
+		}
+		
+		zval_ptr_dtor(&callback->fci.function_name);
+		efree(callback);
+	} ZEND_HASH_FOREACH_END();
+	
+	if (error != NULL) {
+		zend_throw_exception_internal(error);
+	}
+}
+
+
 static int fiber_run_opcode_handler(zend_execute_data *exec)
 {
 	zend_fiber *fiber;
@@ -145,14 +190,19 @@ static int fiber_run_opcode_handler(zend_execute_data *exec)
 	GC_DELREF(&fiber->std);
 
 	if (EG(exception)) {
-		if (fiber->status == ZEND_FIBER_STATUS_DEAD) {
-			zend_clear_exception();
-		} else {
-			fiber->status = ZEND_FIBER_STATUS_DEAD;
-		}
+		fiber->status = ZEND_FIBER_STATUS_DEAD;
+		ZVAL_OBJ(&fiber->result[0], EG(exception));
+		Z_ADDREF(fiber->result[0]);
+		zend_clear_exception();
 	} else {
 		fiber->status = ZEND_FIBER_STATUS_FINISHED;
+		ZVAL_COPY(&fiber->result[1], &retval);
 	}
+	
+	fiber_invoke_callbacks(fiber);
+	
+	zend_array_destroy(fiber->callbacks);
+	fiber->callbacks = NULL;
 
 	return ZEND_USER_OPCODE_RETURN;
 }
@@ -168,6 +218,10 @@ static zend_object *zend_fiber_object_create(zend_class_entry *ce)
 	zend_object_std_init(&fiber->std, ce);
 	fiber->std.handlers = &zend_fiber_handlers;
 	
+	ZVAL_NULL(&fiber->result[0]);
+	ZVAL_NULL(&fiber->result[1]);
+	fiber->callbacks = zend_new_array(0);
+
 	return &fiber->std;
 }
 
@@ -175,6 +229,7 @@ static zend_object *zend_fiber_object_create(zend_class_entry *ce)
 static void zend_fiber_object_destroy(zend_object *object)
 {
 	zend_fiber *fiber;
+	zend_awaitable_callback *callback;
 
 	fiber = (zend_fiber *) object;
 
@@ -183,6 +238,19 @@ static void zend_fiber_object_destroy(zend_object *object)
 
 		zend_fiber_switch_to(fiber);
 	}
+	
+	if (fiber->callbacks != NULL) {
+		ZEND_HASH_FOREACH_PTR(fiber->callbacks, callback) {
+			zval_ptr_dtor(&callback->fci.function_name);
+			efree(callback);
+		} ZEND_HASH_FOREACH_END();
+		
+		zend_array_destroy(fiber->callbacks);
+		fiber->callbacks = NULL;
+	}
+	
+	Z_TRY_DELREF(fiber->result[0]);
+	Z_TRY_DELREF(fiber->result[1]);
 
 	zend_fiber_destroy(fiber->context);
 
@@ -225,13 +293,11 @@ ZEND_METHOD(Fiber, run)
 	fiber->stack_size = FIBER_G(stack_size);
 
 	if (fiber->context == NULL) {
-		GC_DELREF(&fiber->std);
 		zend_throw_error(NULL, "Failed to create native fiber context");
 		return;
 	}
 
 	if (!zend_fiber_create(fiber->context, zend_fiber_run, fiber->stack_size)) {
-		GC_DELREF(&fiber->std);
 		zend_throw_error(NULL, "Failed to create native fiber");
 		return;
 	}
@@ -247,6 +313,9 @@ ZEND_METHOD(Fiber, run)
 		zend_throw_error(NULL, "Failed switching to fiber");
 		return;
 	}
+	
+	GC_ADDREF(&fiber->std);
+	RETURN_OBJ(&fiber->std);
 }
 /* }}} */
 
@@ -279,8 +348,8 @@ ZEND_METHOD(Fiber, continue)
 		fiber->value = value;
 	}
 
-	if (fiber->suspending) {
-		fiber->suspending = 0;
+	if (fiber->state == ZEND_FIBER_STATE_SUSPENDING) {
+		fiber->state = ZEND_FIBER_STATE_READY;
 		return;
 	}
 	
@@ -322,6 +391,7 @@ ZEND_METHOD(Fiber, await)
 	zend_function *func;
 	zval callback;
 	zval context;
+	zend_result result;
 
 	zval *error;
 	
@@ -350,20 +420,19 @@ ZEND_METHOD(Fiber, await)
 	
 	Z_DELREF(callback);
 	
-	fiber->suspending = 1;
+	fiber->state = ZEND_FIBER_STATE_SUSPENDING;
 	
 	ZVAL_STRING(&method_name, "when");
+	result = call_user_function(NULL, awaitable, &method_name, &retval, 1, &callback);
+	zval_ptr_dtor(&method_name);
 	
-	if (call_user_function(NULL, awaitable, &method_name, &retval, 1, &callback) == FAILURE) {
-		fiber->suspending = 0;
-		zval_ptr_dtor(&method_name);
+	if (result == FAILURE) {
+		fiber->state = ZEND_FIBER_STATE_READY;
 		return;
 	}
-	
-	zval_ptr_dtor(&method_name);
 
-	if (fiber->suspending) {
-		fiber->suspending = 0;
+	if (fiber->state == ZEND_FIBER_STATE_SUSPENDING) {
+		fiber->state = ZEND_FIBER_STATE_READY;
 		
 		ZEND_FIBER_BACKUP_EG(fiber->stack, stack_page_size, fiber->exec);
 
@@ -396,6 +465,37 @@ ZEND_METHOD(Fiber, await)
 /* }}} */
 
 
+/* {{{ proto void Fiber::when(callable $when) */
+ZEND_METHOD(Fiber, when)
+{
+	zend_fiber *fiber;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fci_cache;
+	zend_awaitable_callback *callback;
+	
+	ZEND_PARSE_PARAMETERS_START_EX(ZEND_PARSE_PARAMS_THROW, 1, 1)
+		Z_PARAM_FUNC_EX(fci, fci_cache, 1, 0)
+	ZEND_PARSE_PARAMETERS_END();
+	
+	fiber = (zend_fiber *) Z_OBJ_P(getThis());
+	
+	if (fiber->status == ZEND_FIBER_STATUS_FINISHED || fiber->status == ZEND_FIBER_STATUS_DEAD) {
+		fiber_invoke_callback(fiber, &fci, &fci_cache);
+		return;
+	}
+	
+	callback = emalloc(sizeof(zend_awaitable_callback));
+	
+	memcpy(&callback->fci, &fci, sizeof(zend_fcall_info));
+	memcpy(&callback->fci_cache, &fci_cache, sizeof(zend_fcall_info_cache));
+	
+	Z_TRY_ADDREF(callback->fci.function_name);
+	
+	zend_hash_next_index_insert_ptr(fiber->callbacks, callback);
+}
+/* }}} */
+
+
 /* {{{ proto FiberError::__construct(string $message) */
 ZEND_METHOD(FiberError, __construct)
 {
@@ -404,7 +504,7 @@ ZEND_METHOD(FiberError, __construct)
 /* }}} */
 
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_run, 0, 0, IS_VOID, 1)
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_fiber_run, 0, 1, Awaitable, 0)
 	ZEND_ARG_CALLABLE_INFO(0, callable, 0)
 	ZEND_ARG_VARIADIC_INFO(0, arguments)
 ZEND_END_ARG_INFO()
@@ -417,6 +517,10 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_continue, 0, 1, IS_VOID, 0
 	ZEND_ARG_INFO(0, value)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_when, 0, 0, IS_VOID, 0)
+	ZEND_ARG_CALLABLE_INFO(0, when, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_fiber_await, 0, 0, 0)
 	ZEND_ARG_OBJ_INFO(0, awaitable, Awaitable, 0)
 ZEND_END_ARG_INFO()
@@ -424,6 +528,7 @@ ZEND_END_ARG_INFO()
 static const zend_function_entry fiber_methods[] = {
 	ZEND_ME(Fiber, run, arginfo_fiber_run, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_ME(Fiber, continue, arginfo_fiber_continue, ZEND_ACC_PRIVATE)
+	ZEND_ME(Fiber, when, arginfo_fiber_when, ZEND_ACC_PUBLIC)
 	ZEND_ME(Fiber, inFiber, arginfo_fiber_inFiber, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_ME(Fiber, await, arginfo_fiber_await, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_FE_END
@@ -475,6 +580,8 @@ void zend_fiber_ce_register()
 	zend_ce_fiber->create_object = zend_fiber_object_create;
 	zend_ce_fiber->serialize = zend_class_serialize_deny;
 	zend_ce_fiber->unserialize = zend_class_unserialize_deny;
+	
+	zend_class_implements(zend_ce_fiber, 1, zend_ce_awaitable);
 
 	memcpy(&zend_fiber_handlers, &std_object_handlers, sizeof(zend_object_handlers));
 	zend_fiber_handlers.free_obj = zend_fiber_object_destroy;

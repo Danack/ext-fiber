@@ -33,14 +33,20 @@ struct _zend_fiber {
 	/* Status of the fiber, one of the ZEND_FIBER_STATUS_* constants. */
 	zend_uchar status;
 	
-	/* Flag if a suspension is currently pending. */
-	zend_uchar suspending;
+	/* Fiber suspension state, one of the ZEND_FIBER_STATE_* constants. */
+	zend_uchar state;
 	
 	/* Value to return from suspend when resuming the fiber (will be populated by resume()). */
 	zval *value;
 	
 	/* Error to be thrown into a fiber (will be populated by throw()). */
 	zval *error;
+	
+	/* Parameters to provide to callbacks when fiber finishes. */
+	zval result[2];
+	
+	/* Table of zend_when_callbacks to invoke when the fiber finishes. */
+	HashTable *callbacks;
 
 	/* Callback and info / cache to be used when fiber is started. */
 	zend_fcall_info fci;
@@ -59,11 +65,21 @@ struct _zend_fiber {
 	size_t stack_size;
 };
 
+typedef struct _zend_awaitable_callback zend_awaitable_callback;
+
+struct _zend_awaitable_callback {
+	zend_fcall_info fci;
+	zend_fcall_info_cache fci_cache;
+};
+
 static const zend_uchar ZEND_FIBER_STATUS_INIT = 0;
 static const zend_uchar ZEND_FIBER_STATUS_SUSPENDED = 1;
 static const zend_uchar ZEND_FIBER_STATUS_RUNNING = 2;
 static const zend_uchar ZEND_FIBER_STATUS_FINISHED = 3;
 static const zend_uchar ZEND_FIBER_STATUS_DEAD = 4;
+
+static const zend_uchar ZEND_FIBER_STATE_READY = 0;
+static const zend_uchar ZEND_FIBER_STATE_SUSPENDING = 1;
 
 typedef void (* zend_fiber_func)();
 

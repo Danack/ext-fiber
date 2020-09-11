@@ -17,12 +17,12 @@
 
 ZEND_API zend_class_entry *zend_ce_awaitable;
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_awaitable_when, 0, 1, IS_VOID, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_awaitable_onResolve, 0, 1, IS_VOID, 0)
 	ZEND_ARG_CALLABLE_INFO(0, callable, 0)
 ZEND_END_ARG_INFO()
 
 static const zend_function_entry awaitable_methods[] = {
-	ZEND_ABSTRACT_ME(Awaitable, when, arginfo_awaitable_when)
+	ZEND_ABSTRACT_ME(Awaitable, onResolve, arginfo_awaitable_onResolve)
 	ZEND_FE_END
 };
 

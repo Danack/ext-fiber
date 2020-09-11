@@ -18,7 +18,7 @@ final class Fiber implements Awaitable
     /**
      * @inheritDoc
      */
-    public function when(callable $when): void { }
+    public function onResolve(callable $onResolve): void { }
 
     /**
      * Suspend execution of the fiber until the given awaitable resolves.

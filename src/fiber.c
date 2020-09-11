@@ -171,7 +171,7 @@ static void fiber_invoke_callbacks(zend_fiber *fiber)
 		zend_throw_exception_object(&exception);
 		zval_ptr_dtor(&exception);
 
-		zend_throw_error(NULL, "Exception thrown in when() callback");
+		zend_throw_error(NULL, "Exception thrown in onResolve() callback");
 	}
 }
 
@@ -430,7 +430,7 @@ ZEND_METHOD(Fiber, await)
 	
 	fiber->state = ZEND_FIBER_STATE_SUSPENDING;
 	
-	ZVAL_STRING(&method_name, "when");
+	ZVAL_STRING(&method_name, "onResolve");
 	result = call_user_function(NULL, awaitable, &method_name, &retval, 1, &callback);
 	zval_ptr_dtor(&method_name);
 	
@@ -473,8 +473,8 @@ ZEND_METHOD(Fiber, await)
 /* }}} */
 
 
-/* {{{ proto void Fiber::when(callable $when) */
-ZEND_METHOD(Fiber, when)
+/* {{{ proto void Fiber::onResolve(callable $onResolve) */
+ZEND_METHOD(Fiber, onResolve)
 {
 	zend_fiber *fiber;
 	zend_fcall_info fci;
@@ -490,7 +490,7 @@ ZEND_METHOD(Fiber, when)
 	if (fiber->status == ZEND_FIBER_STATUS_FINISHED || fiber->status == ZEND_FIBER_STATUS_DEAD) {
 		fiber_invoke_callback(fiber, &fci, &fci_cache);
 		if (EG(exception)) {
-			zend_throw_error(NULL, "Exception thrown in when callback");
+			zend_throw_error(NULL, "Exception thrown in onResolve callback");
 		}
 		return;
 	}
@@ -528,8 +528,8 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_continue, 0, 1, IS_VOID, 0
 	ZEND_ARG_INFO(0, value)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_when, 0, 0, IS_VOID, 0)
-	ZEND_ARG_CALLABLE_INFO(0, when, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fiber_onResolve, 0, 0, IS_VOID, 0)
+	ZEND_ARG_CALLABLE_INFO(0, onResolve, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_fiber_await, 0, 0, 0)
@@ -539,7 +539,7 @@ ZEND_END_ARG_INFO()
 static const zend_function_entry fiber_methods[] = {
 	ZEND_ME(Fiber, run, arginfo_fiber_run, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_ME(Fiber, continue, arginfo_fiber_continue, ZEND_ACC_PRIVATE)
-	ZEND_ME(Fiber, when, arginfo_fiber_when, ZEND_ACC_PUBLIC)
+	ZEND_ME(Fiber, onResolve, arginfo_fiber_onResolve, ZEND_ACC_PUBLIC)
 	ZEND_ME(Fiber, inFiber, arginfo_fiber_inFiber, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_ME(Fiber, await, arginfo_fiber_await, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	ZEND_FE_END
